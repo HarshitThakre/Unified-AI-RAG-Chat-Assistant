@@ -1,3 +1,10 @@
+<p align="center">
+  <img src="assets/banner.png" width="900">
+</p>
+
+# Unified AI RAG Chat Assistant (PDF + Medical)
+
+
 **📚 Unified AI RAG Chat Assistant (PDF + Medical)**
 
 A dual-mode AI assistant built with Streamlit, HuggingFace LLMs, and FAISS.
