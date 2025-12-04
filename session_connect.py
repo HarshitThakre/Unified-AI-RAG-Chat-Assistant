@@ -3,6 +3,7 @@
 import os
 import numpy as np
 from dotenv import load_dotenv
+import streamlit as st  # for HF_TOKEN via Streamlit Secrets
 
 from langchain_huggingface import (
     HuggingFaceEndpoint,
@@ -17,12 +18,22 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda
 
 # -------------------------------------
-# 1. Load HF Token
+# 1. Load HF Token (local .env OR Streamlit Secrets)
 # -------------------------------------
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN")
+
+# Fallback to Streamlit secrets if env var is not set
 if not HF_TOKEN:
-    raise ValueError("HF_TOKEN missing in .env (add HF_TOKEN=...)")
+    try:
+        HF_TOKEN = st.secrets.get("HF_TOKEN", None)
+    except Exception:
+        HF_TOKEN = None
+
+if not HF_TOKEN:
+    raise ValueError(
+        "HF_TOKEN missing. Set HF_TOKEN in a local .env file or in Streamlit Secrets."
+    )
 
 # -------------------------------------
 # 2. Choose Model (Zephyr or Mistral)
@@ -43,6 +54,7 @@ def load_llm():
         temperature=0.4,
     )
     return base_llm
+
 
 chat_llm = ChatHuggingFace(llm=load_llm())
 
@@ -94,31 +106,56 @@ def cosine_similarity(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
 
 
-def build_context(question: str, docs, threshold: float = 0.55):
+def build_context(
+    question: str,
+    docs,
+    min_relevant_score: float = 0.38,   # if even best doc < this => "I don't know"
+    keep_ratio: float = 0.75            # keep docs with score >= keep_ratio * max_score
+):
     """
     Given a question and a list of docs (chunks), compute cosine similarity
-    and return (context_string, filtered_docs). If nothing is relevant,
-    returns ("", []).
+    and return (context_string, filtered_docs).
+
+    - If no doc is reasonably relevant (max_score < min_relevant_score),
+      returns ("", []) so the caller can answer "I don't know."
+    - Otherwise, keeps docs that are close to the best one in similarity.
     """
+
     if not docs:
         return "", []
 
+    # 1) Embed query once
     query_emb = embedding_model.embed_query(question)
-    scored = []
 
-    for d in docs:
-        doc_emb = embedding_model.embed_query(d.page_content)
-        score = cosine_similarity(query_emb, doc_emb)
+    # 2) Embed all docs correctly
+    doc_texts = [d.page_content for d in docs]
+    doc_embs = embedding_model.embed_documents(doc_texts)
+
+    # 3) Compute cosine similarity scores
+    scored = []
+    for d, emb in zip(docs, doc_embs):
+        score = cosine_similarity(query_emb, emb)
         scored.append((d, score))
 
-    # Keep only relevant docs
-    filtered = [d for (d, s) in scored if s >= threshold]
+    # 4) Find best score
+    max_score = max(s for _, s in scored)
 
-    if not filtered:
+    # 5) If even the best match is weak => no context, force "I don't know"
+    if max_score < min_relevant_score:
         return "", []
 
-    context = "\n\n".join(d.page_content for d in filtered)
-    return context, filtered
+    # 6) Keep docs that are reasonably close to best match
+    cutoff = keep_ratio * max_score
+    filtered_docs = [d for (d, s) in scored if s >= cutoff]
+
+    # Safety: if we decided it's relevant, never return empty
+    if not filtered_docs:
+        # keep the single best doc
+        best_doc = max(scored, key=lambda x: x[1])[0]
+        filtered_docs = [best_doc]
+
+    context = "\n\n".join(d.page_content for d in filtered_docs)
+    return context, filtered_docs
 
 # -------------------------------------
 # 7. Build FAISS index from ONE PDF
@@ -148,7 +185,7 @@ def build_rag_chain(db: FAISS):
       - calls the LLM
       - returns {'result', 'source_documents'}
     """
-    retriever = db.as_retriever(search_kwargs={"k": 4})
+    retriever = db.as_retriever(search_kwargs={"k": 6})  # a few more docs to choose from
 
     def rag_logic(question: str):
         # Step 1: retrieve docs from this PDF
