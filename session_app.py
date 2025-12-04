@@ -81,7 +81,7 @@ if st.sidebar.button("🔁 Start New Session"):
     st.session_state.rag_chain = None
     st.session_state.chat_history = []
     st.session_state.current_pdf = None
-    st.experimental_rerun()
+    st.rerun()
 
 # ----------------------------
 # Show which PDF is active
